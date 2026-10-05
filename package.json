@@ -1,0 +1,80 @@
+{
+  "name": "photo-classifier",
+  "productName": "PhotoClassifier",
+  "version": "1.1.0",
+  "description": "本地旅游照片筛选客户端：分类拷贝 JPG + 同名 ARW、跳过、直方图、EXIF、评分",
+  "main": "electron-main.js",
+  "author": "cn",
+  "license": "MIT",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "app": "electron .",
+    "icon": "node scripts/make-icon.js",
+    "postinstall": "electron-builder install-app-deps",
+    "pack": "npm run icon && electron-builder --mac --dir",
+    "dist": "npm run icon && electron-builder --mac",
+    "dist:universal": "npm run icon && electron-builder --mac --universal"
+  },
+  "dependencies": {
+    "exif-reader": "^2.0.1",
+    "express": "^4.19.2",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.cn.photoclassifier",
+    "productName": "PhotoClassifier",
+    "copyright": "Copyright © 2026",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/sharp/**",
+      "node_modules/@img/**"
+    ],
+    "files": [
+      "electron-main.js",
+      "server.js",
+      "public/**/*",
+      "build/icon.png",
+      "!data/**",
+      "!docs/**",
+      "!scripts/**",
+      "!dist/**",
+      "!**/*.map"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "mac": {
+      "category": "public.app-category.photography",
+      "icon": "build/icon.icns",
+      "target": [
+        { "target": "dmg", "arch": ["arm64"] },
+        { "target": "zip", "arch": ["arm64"] }
+      ],
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "darkModeSupport": true,
+      "extendInfo": {
+        "NSPhotoLibraryUsageDescription": "用于读取并整理你选择的照片文件夹",
+        "NSDesktopFolderUsageDescription": "用于访问桌面上的照片文件夹",
+        "NSDocumentsFolderUsageDescription": "用于访问文稿中的照片文件夹",
+        "NSDownloadsFolderUsageDescription": "用于访问下载中的照片文件夹",
+        "NSRemovableVolumesUsageDescription": "用于读取 SD 卡 / 移动硬盘上的照片"
+      }
+    },
+    "dmg": {
+      "title": "PhotoClassifier",
+      "contents": [
+        { "x": 140, "y": 180 },
+        { "x": 400, "y": 180, "type": "link", "path": "/Applications" }
+      ],
+      "window": { "width": 540, "height": 380 }
+    }
+  }
+}

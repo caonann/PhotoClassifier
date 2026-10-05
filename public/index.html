@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PhotoClassifier · 旅游照片筛选</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <!-- 顶栏 -->
+  <header class="topbar">
+    <div class="brand">📷 PhotoClassifier</div>
+    <div class="source">
+      <input id="sourceInput" type="text" placeholder="照片文件夹路径，或点右侧「选择文件夹」" />
+      <button id="pickSourceBtn" class="btn" title="弹出 Finder 选择文件夹">📁 选择文件夹</button>
+      <button id="loadBtn" class="btn primary">加载</button>
+      <button id="refreshBtn" class="btn" title="重新扫描文件夹">⟳</button>
+    </div>
+    <div class="progress">
+      <span id="progressText">未加载</span>
+      <div class="bar"><div id="progressBar"></div></div>
+      <label class="showall"><input type="checkbox" id="showAllChk" /> 显示已处理</label>
+    </div>
+    <button id="settingsBtn" class="btn" title="设置">⚙︎ 设置</button>
+  </header>
+
+  <main class="layout">
+    <!-- 左：缩略图 -->
+    <aside class="filmstrip" id="filmstrip">
+      <div class="empty">请先在上方输入照片文件夹并点击加载</div>
+    </aside>
+    <div class="resizer" id="stripResizer" title="拖拽调整缩略图栏宽度，双击恢复默认"></div>
+
+    <!-- 中：大图 -->
+    <section class="viewer">
+      <div class="stage" id="stage">
+        <img id="mainImg" alt="" draggable="false" />
+        <div class="stage-empty" id="stageEmpty">没有照片</div>
+        <button class="nav prev" id="prevBtn" title="上一张 (←)">‹</button>
+        <button class="nav next" id="nextBtn" title="下一张 (→)">›</button>
+        <div class="overlay-name" id="overlayName"></div>
+        <div class="overlay-status" id="overlayStatus"></div>
+        <div class="zoom-hint">双击 / 按 <kbd>+</kbd> 放大查看</div>
+      </div>
+      <div class="actionbar">
+        <div class="stars" id="stars" title="评分 (数字键 1-5，0 清除)">
+          <span data-v="1">★</span><span data-v="2">★</span><span data-v="3">★</span><span data-v="4">★</span><span data-v="5">★</span>
+        </div>
+        <div class="categories" id="categoryButtons"></div>
+        <div class="right-actions">
+          <button id="zoomBtn" class="btn" title="放大查看 (+ / 双击)">🔍 放大</button>
+          <button id="skipBtn" class="btn danger" title="跳过，仅做标记不动文件 (X 或 Delete)">⏭ 跳过</button>
+          <button id="undoBtn" class="btn" title="撤销上一步 (Z)" disabled>↶ 撤销</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 右：信息面板 -->
+    <aside class="infopanel">
+      <h3>曝光直方图</h3>
+      <canvas id="histCanvas" width="300" height="140"></canvas>
+      <div class="hist-legend">
+        <label><input type="checkbox" id="chkL" checked /> 亮度</label>
+        <label><input type="checkbox" id="chkRGB" checked /> RGB</label>
+      </div>
+      <div class="exposure" id="exposure"></div>
+      <div id="exifGroups"></div>
+      <h3>快捷键</h3>
+      <ul class="keys">
+        <li><kbd>←</kbd> <kbd>→</kbd> 切换照片</li>
+        <li><kbd>Enter</kbd> / <kbd>Space</kbd> 拷贝到默认分类</li>
+        <li><kbd>Q</kbd> <kbd>W</kbd> <kbd>E</kbd> <kbd>R</kbd> <kbd>T</kbd> … 拷贝到第 1-9 个分类</li>
+        <li><kbd>X</kbd> / <kbd>Delete</kbd> 跳过</li>
+        <li><kbd>1</kbd>-<kbd>5</kbd> 评分，<kbd>0</kbd> 清除</li>
+        <li><kbd>Z</kbd> 撤销</li>
+        <li><kbd>+</kbd> / 双击 放大查看，<kbd>Esc</kbd> 退出；查看器内捏合或 <kbd>⌘</kbd>+滚轮缩放，双指滑动平移</li>
+        <li><kbd>F</kbd> 全屏</li>
+      </ul>
+    </aside>
+  </main>
+
+  <!-- 放大查看器 -->
+  <div class="zoomer" id="zoomer" hidden>
+    <div class="zoom-canvas" id="zoomCanvas">
+      <img id="zoomImg" alt="" draggable="false" />
+    </div>
+    <div class="zoom-toolbar">
+      <button class="btn" id="zoomOut" title="缩小 (-)">−</button>
+      <span id="zoomLevel">100%</span>
+      <button class="btn" id="zoomIn" title="放大 (+)">+</button>
+      <button class="btn" id="zoomFit" title="适应窗口 (0)">适应</button>
+      <button class="btn" id="zoom100" title="实际像素 (1:1)">1:1</button>
+      <button class="btn" id="zoomClose" title="关闭 (Esc)">✕ 关闭</button>
+    </div>
+    <div class="zoom-loading" id="zoomLoading">正在加载原图…</div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+</div>
+
+<!-- 设置弹窗 -->
+<dialog id="settingsDlg">
+  <form method="dialog" class="settings">
+    <h2>分类设置</h2>
+    <label>分类文件夹默认创建位置
+      <div class="row">
+        <input id="baseDirInput" type="text" placeholder="默认与照片文件夹相同" />
+        <button type="button" id="pickBaseBtn" class="btn">📁 选择</button>
+        <button type="button" id="saveBaseBtn" class="btn">保存</button>
+      </div>
+    </label>
+    <label>新建分类（会同时创建 <code>名称</code> 与 <code>名称.arw</code> 两个文件夹）
+      <div class="row">
+        <input id="newCatInput" type="text" placeholder="分类名，例如：精选 / 风景 / 人像" />
+      </div>
+      <div class="row">
+        <input id="newCatDirInput" type="text" placeholder="创建位置（留空使用上面的默认位置）" />
+        <button type="button" id="pickCatDirBtn" class="btn">📁 选择位置</button>
+        <button type="button" id="addCatBtn" class="btn primary">创建</button>
+      </div>
+    </label>
+    <div class="catlist" id="catList"></div>
+    <p class="hint">分类操作是「拷贝」：原照片始终保留在源文件夹，JPG 拷到 <code>名称/</code>，同名 ARW 拷到 <code>名称.arw/</code>。跳过只做标记，不会移动或删除任何文件。</p>
+    <div class="row between">
+      <button type="button" id="resetProgressBtn" class="btn danger">重置当前文件夹的处理记录</button>
+      <button class="btn" value="close">关闭</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
