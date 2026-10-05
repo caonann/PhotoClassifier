@@ -641,9 +641,152 @@ $('resetProgressBtn').onclick = async () => {
   toast('处理记录已重置');
 };
 
+// ---------- 按星级导出 ----------
+const NEW_CAT = '__new__';
+const exp = { min: 4, max: 5, previewTimer: 0 };
+
+function renderStarPick(el, v) {
+  el.querySelectorAll('span[data-v]').forEach((s) => s.classList.toggle('on', Number(s.dataset.v) <= v));
+}
+function renderExportRange() {
+  renderStarPick($('minStarPick'), exp.min);
+  renderStarPick($('maxStarPick'), exp.max);
+  document.querySelectorAll('.star-presets .btn').forEach((b) => {
+    b.classList.toggle('primary', Number(b.dataset.min) === exp.min && Number(b.dataset.max) === exp.max);
+  });
+  scheduleExportPreview();
+}
+function setExportRange(min, max) {
+  exp.min = Math.max(1, Math.min(5, min));
+  exp.max = Math.max(1, Math.min(5, max));
+  if (exp.min > exp.max) [exp.min, exp.max] = [exp.max, exp.min];
+  renderExportRange();
+}
+function scheduleExportPreview() {
+  clearTimeout(exp.previewTimer);
+  exp.previewTimer = setTimeout(loadExportPreview, 120);
+}
+async function loadExportPreview() {
+  const box = $('exportPreview');
+  try {
+    const r = await api(`/api/export-by-stars/preview?minStars=${exp.min}&maxStars=${exp.max}`);
+    if (!r.count) {
+      box.className = 'export-preview none';
+      box.textContent = `没有评分在 ${exp.min}★ 到 ${exp.max}★ 之间的照片`;
+      $('exportRunBtn').disabled = true;
+      return;
+    }
+    box.className = 'export-preview';
+    const dist = [];
+    for (let s = exp.max; s >= exp.min; s--) if (r.byStars[s]) dist.push(`<b>${'★'.repeat(s)}</b> ${r.byStars[s]} 张`);
+    box.innerHTML = `共匹配 <b>${r.count}</b> 张照片（${exp.min === exp.max ? `${exp.min}★` : `${exp.min}★ 到 ${exp.max}★`}）<br>` +
+      `<span class="dist">${dist.join('　')}</span>`;
+    $('exportRunBtn').disabled = false;
+  } catch (e) {
+    box.className = 'export-preview none';
+    box.textContent = e.message;
+    $('exportRunBtn').disabled = true;
+  }
+}
+function renderExportCatSelect() {
+  const sel = $('exportCatSelect');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  const optNew = document.createElement('option');
+  optNew.value = NEW_CAT;
+  optNew.textContent = '＋ 新建一个分类…';
+  sel.appendChild(optNew);
+  (state.config.categories || []).forEach((c) => {
+    const o = document.createElement('option');
+    o.value = c.name;
+    o.textContent = `${c.name}  (${c.dir})`;
+    sel.appendChild(o);
+  });
+  sel.value = [...sel.options].some((o) => o.value === prev) ? prev : NEW_CAT;
+  toggleExportNewCatRows();
+}
+function toggleExportNewCatRows() {
+  const isNew = $('exportCatSelect').value === NEW_CAT;
+  $('exportNewCatRow').hidden = !isNew;
+  $('exportNewCatDirRow').hidden = !isNew;
+}
+function openExportDialog() {
+  if (!state.config?.sourceDir) { toast('请先加载照片文件夹', true); return; }
+  renderExportCatSelect();
+  const dirInput = $('exportNewCatDirInput');
+  if (!dirInput.value) dirInput.value = localStorage.getItem('photoClassifier.lastCatDir') || '';
+  if (!$('exportNewCatInput').value) $('exportNewCatInput').value = suggestExportName();
+  renderExportRange();
+  $('exportDlg').showModal();
+}
+function suggestExportName() {
+  if (exp.min === exp.max) return `精选 ${exp.min}星`;
+  if (exp.max === 5) return `精选 ${exp.min}星以上`;
+  return `精选 ${exp.min}-${exp.max}星`;
+}
+async function runExport() {
+  const btn = $('exportRunBtn');
+  const sel = $('exportCatSelect').value;
+  const body = { minStars: exp.min, maxStars: exp.max, markProcessed: $('exportMarkChk').checked };
+  if (sel === NEW_CAT) {
+    const name = $('exportNewCatInput').value.trim();
+    if (!name) { toast('请输入新分类名', true); $('exportNewCatInput').focus(); return; }
+    const baseDir = $('exportNewCatDirInput').value.trim() || undefined;
+    body.newCategory = { name, baseDir, color: PALETTE[state.config.categories.length % PALETTE.length] };
+    if (baseDir) localStorage.setItem('photoClassifier.lastCatDir', baseDir);
+  } else body.category = sel;
+
+  btn.disabled = true;
+  btn.textContent = '正在拷贝…';
+  try {
+    const r = await api('/api/export-by-stars', { method: 'POST', body });
+    state.config = r.config;
+    renderCategories();
+    $('exportDlg').close();
+    $('exportNewCatInput').value = '';
+    const parts = [`已把 ${r.copied} 张照片拷贝到「${r.category.name}」`];
+    if (r.withRaw) parts.push(`含 ${r.withRaw} 个 ARW`);
+    if (r.skipped.length) parts.push(`${r.skipped.length} 张因目标已存在同名文件而跳过`);
+    if (r.failed.length) parts.push(`${r.failed.length} 张失败`);
+    toast(parts.join('，'), r.failed.length > 0);
+    if (r.failed.length) console.warn('导出失败明细', r.failed);
+    $('undoBtn').disabled = false;
+    if (body.markProcessed) await loadPhotos(true);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '开始拷贝';
+  }
+}
+$('exportStarsBtn').onclick = openExportDialog;
+$('exportRunBtn').onclick = runExport;
+$('exportCatSelect').onchange = toggleExportNewCatRows;
+$('exportPickDirBtn').onclick = async () => {
+  const dir = await pickFolder('category', $('exportPickDirBtn'));
+  if (dir) $('exportNewCatDirInput').value = dir;
+};
+$('minStarPick').addEventListener('click', (e) => {
+  if (!e.target.dataset.v) return;
+  const v = Number(e.target.dataset.v);
+  setExportRange(v, Math.max(v, exp.max));
+});
+$('maxStarPick').addEventListener('click', (e) => {
+  if (!e.target.dataset.v) return;
+  const v = Number(e.target.dataset.v);
+  setExportRange(Math.min(v, exp.min), v);
+});
+document.querySelectorAll('.star-presets .btn').forEach((b) => {
+  b.addEventListener('click', () => {
+    setExportRange(Number(b.dataset.min), Number(b.dataset.max));
+    if ($('exportCatSelect').value === NEW_CAT) $('exportNewCatInput').value = suggestExportName();
+  });
+});
+$('exportNewCatInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); runExport(); } });
+
 document.addEventListener('keydown', (e) => {
-  if ($('settingsDlg').open) return;
-  if (e.target.tagName === 'INPUT') return;
+  if ($('settingsDlg').open || $('exportDlg').open) return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   const k = e.key.toLowerCase();
   if (zoom.open) {
     if (k === 'escape') closeZoom();

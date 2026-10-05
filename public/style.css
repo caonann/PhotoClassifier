@@ -122,6 +122,24 @@ dialog::backdrop { background: rgba(0,0,0,.6); }
 .catitem button { padding: 3px 8px; font-size: 12px; }
 .hint { font-size: 12px; color: var(--muted); margin: 0; }
 
+/* 按星级导出 */
+select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; width: 100%; }
+select:focus { outline: none; border-color: var(--accent); }
+.star-range { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+.star-pick { display: flex; align-items: center; gap: 2px; font-size: 22px; color: #444; cursor: pointer; user-select: none; }
+.star-pick .lbl { font-size: 12px; color: var(--muted); margin-right: 6px; }
+.star-pick span[data-v].on { color: var(--star); }
+.star-pick span[data-v]:hover { transform: scale(1.15); display: inline-block; }
+.star-presets { display: flex; gap: 6px; flex-wrap: wrap; }
+.star-presets .btn { padding: 3px 9px; font-size: 12px; }
+.export-preview { font-size: 12px; color: var(--text); background: var(--panel2); border-radius: 6px; padding: 8px 10px; line-height: 1.6; }
+.export-preview .dist { color: var(--muted); }
+.export-preview .dist b { color: var(--star); font-weight: normal; }
+.export-preview.none { color: var(--muted); }
+.settings label.checkline { flex-direction: row; align-items: center; gap: 6px; cursor: pointer; }
+.settings label.checkline input { margin: 0; }
+.row[hidden] { display: none; }
+
 /* 全屏 */
 .stage:fullscreen { background: #000; }
 .stage:fullscreen .nav { opacity: 1; }

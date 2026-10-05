@@ -22,6 +22,7 @@
       <div class="bar"><div id="progressBar"></div></div>
       <label class="showall"><input type="checkbox" id="showAllChk" /> 显示已处理</label>
     </div>
+    <button id="exportStarsBtn" class="btn" title="把评分在某个范围内的照片额外拷贝到一个分类">★ 按星级导出</button>
     <button id="settingsBtn" class="btn" title="设置">⚙︎ 设置</button>
   </header>
 
@@ -125,6 +126,55 @@
     <div class="row between">
       <button type="button" id="resetProgressBtn" class="btn danger">重置当前文件夹的处理记录</button>
       <button class="btn" value="close">关闭</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 按星级导出弹窗 -->
+<dialog id="exportDlg">
+  <form method="dialog" class="settings">
+    <h2>★ 按星级导出到分类</h2>
+    <p class="hint">把当前文件夹中评分落在所选范围内的 JPG（及同名 ARW）额外拷贝一份到目标分类。原照片与已有的处理记录都不受影响。</p>
+
+    <label>星级范围
+      <div class="star-range">
+        <div class="star-pick" id="minStarPick" data-role="min" title="最少几颗星">
+          <span class="lbl">从</span>
+          <span data-v="1">★</span><span data-v="2">★</span><span data-v="3">★</span><span data-v="4">★</span><span data-v="5">★</span>
+        </div>
+        <div class="star-pick" id="maxStarPick" data-role="max" title="最多几颗星">
+          <span class="lbl">到</span>
+          <span data-v="1">★</span><span data-v="2">★</span><span data-v="3">★</span><span data-v="4">★</span><span data-v="5">★</span>
+        </div>
+      </div>
+      <div class="star-presets">
+        <button type="button" class="btn" data-min="5" data-max="5">仅 5★</button>
+        <button type="button" class="btn" data-min="4" data-max="5">4★ 以上</button>
+        <button type="button" class="btn" data-min="3" data-max="5">3★ 以上</button>
+        <button type="button" class="btn" data-min="1" data-max="2">1-2★</button>
+        <button type="button" class="btn" data-min="1" data-max="5">全部已评分</button>
+      </div>
+      <div class="export-preview" id="exportPreview">正在统计…</div>
+    </label>
+
+    <label>目标分类
+      <div class="row">
+        <select id="exportCatSelect"></select>
+      </div>
+      <div class="row" id="exportNewCatRow">
+        <input id="exportNewCatInput" type="text" placeholder="新分类名，例如：精选 4星以上" />
+      </div>
+      <div class="row" id="exportNewCatDirRow">
+        <input id="exportNewCatDirInput" type="text" placeholder="创建位置（留空使用默认位置）" />
+        <button type="button" id="exportPickDirBtn" class="btn">📁 选择位置</button>
+      </div>
+    </label>
+
+    <label class="checkline"><input type="checkbox" id="exportMarkChk" /> 同时把这些照片标记为「已处理」（默认不标记，仅额外拷贝）</label>
+
+    <div class="row between">
+      <button class="btn" value="close">取消</button>
+      <button type="button" id="exportRunBtn" class="btn primary">开始拷贝</button>
     </div>
   </form>
 </dialog>

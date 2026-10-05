@@ -134,14 +134,40 @@ function requireSource() {
   return config.sourceDir;
 }
 
+/** 新建分类：在 baseDir（可选，默认分类根目录）下创建 <name> 与 <name>.arw，并写入配置 */
+async function createCategory(name, baseDir, color) {
+  name = String(name || '').trim();
+  if (!name || /[\/\\:*?"<>|]/.test(name)) throw httpError(400, '分类名不能为空且不能包含 / \\ : * ? " < > |');
+  if (config.categories.some((c) => c.name === name)) throw httpError(409, '分类已存在');
+  const base = baseDir ? expandHome(String(baseDir).trim()) : config.categoryBaseDir || requireSource();
+  const dir = path.join(base, name);
+  const { jpgDir, rawDir } = categoryDirs({ dir });
+  await fsp.mkdir(jpgDir, { recursive: true });
+  await fsp.mkdir(rawDir, { recursive: true });
+  const cat = { name, dir, color: color || null };
+  config.categories.push(cat);
+  if (!config.defaultCategory) config.defaultCategory = name;
+  saveConfig();
+  return cat;
+}
+
+/** 源文件夹第一层的全部 JPG 文件名（自然排序） */
+async function listJpgs(src) {
+  const entries = await fsp.readdir(src, { withFileTypes: true });
+  return entries
+    .filter((e) => e.isFile() && JPG_EXTS.has(path.extname(e.name).toLowerCase()))
+    .map((e) => e.name)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
 function processedMap() {
   const src = requireSource();
   if (!processed[src]) processed[src] = {};
   return processed[src];
 }
 
-/** 拷贝 jpg + raw 到分类文件夹，原文件保留 */
-async function copyPair(jpgName, cat) {
+/** 仅拷贝 jpg + raw 到分类文件夹（不写处理记录），返回副本路径 */
+async function copyPairFiles(jpgName, cat) {
   const src = requireSource();
   const from = path.join(src, jpgName);
   if (!(await exists(from))) throw httpError(404, '照片不存在: ' + jpgName);
@@ -160,7 +186,13 @@ async function copyPair(jpgName, cat) {
       throw e;
     }
   }
-  const copies = [to, rawTo].filter(Boolean);
+  return { to, rawTo, hasRaw: !!rawFrom, copies: [to, rawTo].filter(Boolean) };
+}
+
+/** 拷贝 jpg + raw 到分类文件夹并写入处理记录，原文件保留 */
+async function copyPair(jpgName, cat) {
+  const src = requireSource();
+  const { to, rawTo, hasRaw, copies } = await copyPairFiles(jpgName, cat);
   const rec = { action: 'copy', category: cat.name, copies, at: Date.now() };
   const pm = processedMap();
   const prev = pm[jpgName] || null;
@@ -168,7 +200,7 @@ async function copyPair(jpgName, cat) {
   saveProcessed();
   undoStack.push({ label: `拷贝到「${cat.name}」`, jpgName, src, rec, prev });
   if (undoStack.length > 200) undoStack.shift();
-  return { to, rawTo, hasRaw: !!rawFrom };
+  return { to, rawTo, hasRaw };
 }
 
 // ---------- 图像处理 ----------
@@ -456,17 +488,7 @@ app.post('/api/config/category-base', wrap(async (req, res) => {
 
 /** 新建分类：在 baseDir（可选，默认分类根目录）下创建 <name> 与 <name>.arw */
 app.post('/api/categories', wrap(async (req, res) => {
-  const name = String(req.body.name || '').trim();
-  if (!name || /[\/\\:*?"<>|]/.test(name)) throw httpError(400, '分类名不能为空且不能包含 / \\ : * ? " < > |');
-  if (config.categories.some((c) => c.name === name)) throw httpError(409, '分类已存在');
-  const base = req.body.baseDir ? expandHome(String(req.body.baseDir).trim()) : config.categoryBaseDir || requireSource();
-  const dir = path.join(base, name);
-  const { jpgDir, rawDir } = categoryDirs({ dir });
-  await fsp.mkdir(jpgDir, { recursive: true });
-  await fsp.mkdir(rawDir, { recursive: true });
-  config.categories.push({ name, dir, color: req.body.color || null });
-  if (!config.defaultCategory) config.defaultCategory = name;
-  saveConfig();
+  await createCategory(req.body.name, req.body.baseDir, req.body.color);
   res.json(config);
 }));
 
@@ -570,6 +592,100 @@ app.post('/api/move', wrap(async (req, res) => {
   res.json({ ok: true, ...r });
 }));
 
+// ---------- 按星级批量拷贝 ----------
+function parseStarRange(q) {
+  const min = Math.max(1, Math.min(5, parseInt(q.minStars, 10) || 1));
+  const max = Math.max(1, Math.min(5, parseInt(q.maxStars, 10) || 5));
+  if (min > max) throw httpError(400, '星级范围无效：最小值不能大于最大值');
+  return { min, max };
+}
+
+/** 当前源文件夹中评分落在 [min, max] 内的 JPG（含评分，自然排序） */
+async function photosByStars(src, min, max) {
+  const names = await listJpgs(src);
+  return names
+    .map((name) => ({ name, rating: getRating(src, name) }))
+    .filter((p) => p.rating >= min && p.rating <= max);
+}
+
+/** 预览：统计符合星级范围的照片数量与评分分布 */
+app.get('/api/export-by-stars/preview', wrap(async (req, res) => {
+  const src = requireSource();
+  const { min, max } = parseStarRange(req.query);
+  const matched = await photosByStars(src, min, max);
+  const byStars = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  for (const p of matched) byStars[p.rating]++;
+  res.json({ minStars: min, maxStars: max, count: matched.length, byStars, sample: matched.slice(0, 12).map((p) => p.name) });
+}));
+
+/**
+ * 执行：把评分在 [minStars, maxStars] 内的 JPG（+同名 ARW）额外拷贝到一个分类。
+ * body: { minStars, maxStars, category?, newCategory?: { name, baseDir?, color? }, markProcessed?: boolean }
+ * - category 与 newCategory 二选一；给 newCategory 时会先创建该分类。
+ * - 这是「额外拷贝」：默认不改变照片原有的处理记录（markProcessed=false）。
+ * - 目标已存在同名文件时跳过该张并计入 skipped，不中断整批。
+ */
+app.post('/api/export-by-stars', wrap(async (req, res) => {
+  const src = requireSource();
+  const { min, max } = parseStarRange(req.body);
+  const markProcessed = !!req.body.markProcessed;
+
+  let cat;
+  if (req.body.newCategory && req.body.newCategory.name) {
+    const nc = req.body.newCategory;
+    cat = await createCategory(nc.name, nc.baseDir, nc.color);
+  } else {
+    cat = config.categories.find((c) => c.name === req.body.category);
+    if (!cat) throw httpError(404, '分类不存在，请选择已有分类或填写新分类名');
+  }
+
+  const matched = await photosByStars(src, min, max);
+  const copied = [], skipped = [], failed = [];
+  const allCopies = [];
+  const pm = processedMap();
+  const prevRecords = {};
+
+  for (const p of matched) {
+    try {
+      const r = await copyPairFiles(p.name, cat);
+      copied.push({ name: p.name, rating: p.rating, hasRaw: r.hasRaw });
+      allCopies.push(...r.copies);
+      if (markProcessed) {
+        prevRecords[p.name] = pm[p.name] || null;
+        pm[p.name] = { action: 'copy', category: cat.name, copies: r.copies, at: Date.now() };
+      }
+    } catch (e) {
+      if (e.status === 409) skipped.push({ name: p.name, reason: '目标已存在同名文件' });
+      else failed.push({ name: p.name, reason: e.message });
+    }
+  }
+
+  if (copied.length) {
+    if (markProcessed) saveProcessed();
+    // 作为一次整体操作压入撤销栈：撤销时删除全部副本，并恢复各张原有处理记录
+    undoStack.push({
+      label: `按星级 ${min}-${max}★ 批量拷贝到「${cat.name}」(${copied.length} 张)`,
+      jpgName: copied.length === 1 ? copied[0].name : `${copied.length} 张照片`,
+      src,
+      rec: { action: 'copy', category: cat.name, copies: allCopies, at: Date.now() },
+      prev: null,
+      batch: markProcessed ? prevRecords : null,
+    });
+    if (undoStack.length > 200) undoStack.shift();
+  }
+
+  res.json({
+    ok: true,
+    category: { name: cat.name, dir: cat.dir },
+    minStars: min, maxStars: max,
+    matched: matched.length,
+    copied: copied.length,
+    skipped, failed,
+    withRaw: copied.filter((c) => c.hasRaw).length,
+    config,
+  });
+}));
+
 /** 跳过 = 仅标记，不动任何文件 */
 app.post('/api/skip', wrap(async (req, res) => {
   const name = safeName(req.body.name);
@@ -591,7 +707,13 @@ app.post('/api/undo', wrap(async (req, res) => {
   if (!op) throw httpError(400, '没有可撤销的操作');
   for (const f of op.rec.copies || []) await fsp.unlink(f).catch(() => {});
   if (!processed[op.src]) processed[op.src] = {};
-  if (op.prev) processed[op.src][op.jpgName] = op.prev;
+  if ('batch' in op) {
+    // 批量拷贝：仅当当时勾选了「标记为已处理」才需要逐张恢复原有处理记录
+    for (const [name, prev] of Object.entries(op.batch || {})) {
+      if (prev) processed[op.src][name] = prev;
+      else delete processed[op.src][name];
+    }
+  } else if (op.prev) processed[op.src][op.jpgName] = op.prev;
   else delete processed[op.src][op.jpgName];
   saveProcessed();
   res.json({ ok: true, restored: op.jpgName, label: op.label });
