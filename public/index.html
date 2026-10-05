@@ -37,6 +37,9 @@
     <section class="viewer">
       <div class="stage" id="stage">
         <img id="mainImg" alt="" draggable="false" />
+        <div class="focus-layer" id="focusLayer" hidden>
+          <div class="focus-box" id="focusBox"></div>
+        </div>
         <div class="stage-empty" id="stageEmpty">没有照片</div>
         <button class="nav prev" id="prevBtn" title="上一张 (←)">‹</button>
         <button class="nav next" id="nextBtn" title="下一张 (→)">›</button>
@@ -50,6 +53,7 @@
         </div>
         <div class="categories" id="categoryButtons"></div>
         <div class="right-actions">
+          <button id="focusBtn" class="btn" title="显示/隐藏对焦区域 (A)">⌖ 对焦区域</button>
           <button id="zoomBtn" class="btn" title="放大查看 (+ / 双击)">🔍 放大</button>
           <button id="skipBtn" class="btn danger" title="跳过，仅做标记不动文件 (X 或 Delete)">⏭ 跳过</button>
           <button id="undoBtn" class="btn" title="撤销上一步 (Z)" disabled>↶ 撤销</button>
@@ -75,6 +79,7 @@
         <li><kbd>X</kbd> / <kbd>Delete</kbd> 跳过</li>
         <li><kbd>1</kbd>-<kbd>5</kbd> 评分，<kbd>0</kbd> 清除</li>
         <li><kbd>Z</kbd> 撤销</li>
+        <li><kbd>A</kbd> 显示/隐藏对焦区域</li>
         <li><kbd>+</kbd> / 双击 放大查看，<kbd>Esc</kbd> 退出；查看器内捏合或 <kbd>⌘</kbd>+滚轮缩放，双指滑动平移</li>
         <li><kbd>F</kbd> 全屏</li>
       </ul>

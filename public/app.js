@@ -14,6 +14,8 @@ const state = {
   infoAbort: null,
   lastHistogram: null,
   showAll: false,
+  focus: null,
+  showFocus: localStorage.getItem('photoClassifier.showFocus') !== '0',
 };
 
 // ---------- 通用 ----------
@@ -244,6 +246,8 @@ function showCurrent() {
     $('overlayName').textContent = '';
     status.className = 'overlay-status';
     renderStars(0);
+    state.focus = null;
+    renderFocus();
     $('exifGroups').innerHTML = '';
     $('exposure').innerHTML = '';
     drawHistogram(null);
@@ -251,8 +255,10 @@ function showCurrent() {
   }
   stage.classList.remove('empty');
   img.classList.add('loading');
+  state.focus = null;
+  renderFocus();
   img.src = imgUrl(p.name, 1800);
-  img.onload = () => img.classList.remove('loading');
+  img.onload = () => { img.classList.remove('loading'); renderFocus(); };
   $('overlayName').textContent = `${p.name}  (${state.index + 1}/${state.photos.length})`;
   if (p.processed) {
     status.className = 'overlay-status ' + p.processed.action;
@@ -274,6 +280,8 @@ async function loadInfo(name) {
     const info = await res.json();
     if (ac.signal.aborted || current()?.name !== name) return;
     state.lastHistogram = info.histogram;
+    state.focus = info.exif?.focus || null;
+    renderFocus();
     drawHistogram(info.histogram);
     renderExposure(info.histogram.stats);
     renderExif(info.exif);
@@ -289,6 +297,7 @@ const EXIF_GROUPS = [
     ['焦距', ex.focal35 && ex.focal35 !== ex.focal ? `${ex.focal}（等效 ${ex.focal35}）` : ex.focal],
     ['曝光补偿', ex.ev], ['曝光模式', ex.exposureProgram], ['测光', ex.metering], ['白平衡', ex.whiteBalance],
     ['闪光灯', ex.flash], ['亮度值', ex.brightness], ['对焦距离', ex.subjectDistance], ['数码变焦', ex.digitalZoom],
+    ['对焦位置', ex.focus ? { html: `<span class="focus-info"><b>⌖</b> (${ex.focus.px.x}, ${ex.focus.px.y})${ex.focus.px.w ? ` · 框 ${ex.focus.px.w}×${ex.focus.px.h}` : ''}${ex.focus.maybeDefault ? ' <span class="warn">（居中，可能为默认值）</span>' : ''}</span>` } : null],
   ] },
   { title: '器材', open: true, rows: (ex) => [
     ['相机', ex.camera], ['镜头', ex.lens], ['镜头最大光圈', ex.maxAperture], ['机身序列号', ex.bodySerial], ['镜头序列号', ex.lensSerial], ['软件', ex.software],
@@ -376,6 +385,58 @@ function drawHistogram(h) {
   if (h.stats.clipLowPct > 3) { ctx.fillStyle = 'rgba(120,120,255,.8)'; ctx.fillRect(0, 0, 4, H); }
 }
 $('chkL').onchange = $('chkRGB').onchange = () => drawHistogram(state.lastHistogram);
+
+// ---------- 对焦区域 ----------
+/** 把归一化的对焦框映射到大图实际显示区域（object-fit: contain 的内容矩形） */
+function renderFocus() {
+  const layer = $('focusLayer');
+  const box = $('focusBox');
+  const img = $('mainImg');
+  const f = state.focus;
+  $('focusBtn').classList.toggle('active', state.showFocus);
+  if (!f || !state.showFocus || !img.naturalWidth || !img.complete || $('stage').classList.contains('empty')) {
+    layer.hidden = true;
+    return;
+  }
+  // 计算 contain 后图片内容在 stage 内的矩形
+  const cw = img.clientWidth, ch = img.clientHeight;
+  const ratio = Math.min(cw / img.naturalWidth, ch / img.naturalHeight);
+  const dw = img.naturalWidth * ratio, dh = img.naturalHeight * ratio;
+  const left = img.offsetLeft + (cw - dw) / 2, top = img.offsetTop + (ch - dh) / 2;
+  layer.style.left = left + 'px';
+  layer.style.top = top + 'px';
+  layer.style.width = dw + 'px';
+  layer.style.height = dh + 'px';
+  layer.hidden = false;
+
+  box.className = 'focus-box ' + (f.type === 'frame' ? 'frame' : 'point') + (f.maybeDefault ? ' default' : '');
+  box.style.left = f.cx * 100 + '%';
+  box.style.top = f.cy * 100 + '%';
+  if (f.type === 'frame') {
+    box.style.width = Math.max(12, f.w * dw) + 'px';
+    box.style.height = Math.max(12, f.h * dh) + 'px';
+  } else {
+    box.style.width = box.style.height = '';
+  }
+  box.title = focusDescription(f);
+}
+function focusDescription(f) {
+  if (!f) return '';
+  const p = f.px;
+  let s = `对焦${f.type === 'frame' ? '框' : '点'} (${p.x}, ${p.y})`;
+  if (p.w) s += `，${p.w}×${p.h} px`;
+  s += ` / 图像 ${p.imgW}×${p.imgH}，来源：${f.source}`;
+  if (f.maybeDefault) s += '。位置恰在正中心，可能是相机未记录到对焦位置时的默认值';
+  return s;
+}
+function toggleFocus(force) {
+  state.showFocus = typeof force === 'boolean' ? force : !state.showFocus;
+  localStorage.setItem('photoClassifier.showFocus', state.showFocus ? '1' : '0');
+  renderFocus();
+  if (state.showFocus && current() && !state.focus) toast('这张照片没有记录对焦位置信息');
+}
+$('focusBtn').onclick = () => toggleFocus();
+new ResizeObserver(() => renderFocus()).observe($('stage'));
 
 // ---------- 评分 ----------
 function renderStars(v) {
@@ -808,6 +869,7 @@ document.addEventListener('keydown', (e) => {
   }
   else if (k === 'x' || k === 'delete' || k === 'backspace') { e.preventDefault(); skip(); }
   else if (k === 'z') undo();
+  else if (k === 'a') toggleFocus();
   else if (k === '+' || k === '=') openZoom();
   else if (k === 'f') { const st = $('stage'); document.fullscreenElement ? document.exitFullscreen() : st.requestFullscreen(); }
   else if (/^[0-5]$/.test(k)) rate(Number(k));
@@ -819,6 +881,7 @@ document.addEventListener('keydown', (e) => {
 
 window.addEventListener('resize', () => {
   drawHistogram(state.lastHistogram);
+  renderFocus();
   if (zoom.open) zoomApply();
   applyStripWidth(parseInt(getComputedStyle(document.documentElement).getPropertyValue('--strip-w'), 10) || STRIP_DEFAULT);
 });

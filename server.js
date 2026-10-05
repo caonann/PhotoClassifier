@@ -356,6 +356,133 @@ function aspect(w, h) {
   return hit ? hit[1] : r.toFixed(2);
 }
 
+// ---------- 对焦区域 ----------
+/** 轻量 TIFF 读取器（偏移均相对 TIFF 头），用于解析 exif-reader 不处理的 MakerNote */
+function tiffReader(buf, be) {
+  return {
+    be,
+    u16: (o) => (o >= 0 && o + 2 <= buf.length ? (be ? buf.readUInt16BE(o) : buf.readUInt16LE(o)) : null),
+    u32: (o) => (o >= 0 && o + 4 <= buf.length ? (be ? buf.readUInt32BE(o) : buf.readUInt32LE(o)) : null),
+  };
+}
+
+const TIFF_TYPE_SIZE = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8];
+
+/** 读取一个 IFD，返回 Map<tag, { type, count, valueOffset }>，entries 上限防止脏数据 */
+function readIfd(buf, rd, offset, maxEntries = 400) {
+  const n = rd.u16(offset);
+  if (n == null || n === 0 || n > maxEntries || offset + 2 + n * 12 > buf.length) return null;
+  const map = new Map();
+  for (let i = 0; i < n; i++) {
+    const e = offset + 2 + i * 12;
+    const tag = rd.u16(e), type = rd.u16(e + 2), count = rd.u32(e + 4);
+    if (type == null || type < 1 || type > 10) continue;
+    const size = TIFF_TYPE_SIZE[type] * count;
+    const valueOffset = size <= 4 ? e + 8 : rd.u32(e + 8);
+    if (valueOffset == null || valueOffset + size > buf.length) continue;
+    map.set(tag, { type, count, valueOffset });
+  }
+  return map;
+}
+
+function readShorts(buf, rd, entry) {
+  if (!entry || entry.type !== 3) return null;
+  const out = [];
+  for (let i = 0; i < entry.count; i++) out.push(rd.u16(entry.valueOffset + i * 2));
+  return out;
+}
+
+/** 从 Sony MakerNote 提取对焦相关 tag（0x2027 FocusLocation、0x2037 FocusFrameSize、0x201d FlexibleSpotPosition） */
+function readSonyFocusTags(exifBuf) {
+  try {
+    const start = exifBuf.toString('ascii', 0, 5) === 'Exif\0' ? 6 : 0;
+    const buf = exifBuf.subarray(start);
+    const be = buf[0] === 0x4d && buf[1] === 0x4d;
+    const rd = tiffReader(buf, be);
+    if (rd.u16(2) !== 0x2a) return null;
+    const ifd0 = readIfd(buf, rd, rd.u32(4));
+    const exifPtr = ifd0?.get(0x8769);
+    if (!exifPtr) return null;
+    const exifIfd = readIfd(buf, rd, rd.u32(exifPtr.valueOffset));
+    const mn = exifIfd?.get(0x927c);
+    if (!mn || mn.type !== 7) return null;
+    if (buf.toString('ascii', mn.valueOffset, mn.valueOffset + 4) !== 'SONY') return null;
+    // Sony MakerNote：12 字节头（"SONY DSC \0\0\0" 等）+ 标准 IFD，偏移相对 TIFF 头；字节序偶有与主文件不同
+    const ifdStart = mn.valueOffset + 12;
+    let r = rd;
+    let ifd = readIfd(buf, r, ifdStart);
+    if (!ifd) { r = tiffReader(buf, !be); ifd = readIfd(buf, r, ifdStart); }
+    if (!ifd) return null;
+    return {
+      focusLocation: readShorts(buf, r, ifd.get(0x2027)) || readShorts(buf, r, ifd.get(0x204a)),
+      focusFrameSize: readShorts(buf, r, ifd.get(0x2037)),
+      flexibleSpot: readShorts(buf, r, ifd.get(0x201d)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 把未旋转坐标系（0..1）下的点/框按 EXIF Orientation 映射到显示坐标系 */
+function orientNormalized(cx, cy, w, h, orientation) {
+  switch (orientation) {
+    case 2: return { cx: 1 - cx, cy, w, h };
+    case 3: return { cx: 1 - cx, cy: 1 - cy, w, h };
+    case 4: return { cx, cy: 1 - cy, w, h };
+    case 5: return { cx: cy, cy: cx, w: h, h: w };
+    case 6: return { cx: 1 - cy, cy: cx, w: h, h: w };
+    case 7: return { cx: 1 - cy, cy: 1 - cx, w: h, h: w };
+    case 8: return { cx: cy, cy: 1 - cx, w: h, h: w };
+    default: return { cx, cy, w, h };
+  }
+}
+
+/**
+ * 对焦区域（显示坐标系下的归一化值）：
+ * { type: 'frame'|'point', cx, cy, w, h, source, px: { x, y, w, h, imgW, imgH }, maybeDefault }
+ * 优先 Sony MakerNote（FocusLocation + FocusFrameSize），否则退回标准 EXIF SubjectArea / SubjectLocation。
+ */
+function extractFocusArea(exifBuf, photoIfd, meta) {
+  const orientation = meta.orientation || 1;
+  const W0 = meta.width, H0 = meta.height;
+  let res = null;
+
+  const sony = exifBuf ? readSonyFocusTags(exifBuf) : null;
+  const loc = sony?.focusLocation;
+  if (loc && loc.length >= 4 && loc[0] > 0 && loc[1] > 0 && loc[2] <= loc[0] && loc[3] <= loc[1]) {
+    const [W, H, X, Y] = loc;
+    const fs = sony.focusFrameSize;
+    const hasFrame = fs && fs.length >= 2 && fs[0] > 0 && fs[1] > 0 && (fs.length < 3 || fs[2] !== 0);
+    const o = orientNormalized(X / W, Y / H, hasFrame ? fs[0] / W : 0, hasFrame ? fs[1] / H : 0, orientation);
+    res = {
+      type: hasFrame ? 'frame' : 'point', ...o, source: 'Sony MakerNote',
+      px: { x: X, y: Y, w: hasFrame ? fs[0] : null, h: hasFrame ? fs[1] : null, imgW: W, imgH: H },
+      // 相机取不到对焦位置时会写图像正中心，无法与真正对准中心区分，仅做提示
+      maybeDefault: !hasFrame && Math.abs(X - W / 2) <= 1 && Math.abs(Y - H / 2) <= 1,
+    };
+  }
+
+  if (!res && W0 && H0) {
+    const sa = photoIfd?.SubjectArea ?? photoIfd?.SubjectLocation;
+    const arr = Array.isArray(sa) ? sa : typeof sa === 'number' ? [sa] : null;
+    if (arr && arr.length >= 2 && arr.every((v) => typeof v === 'number')) {
+      const [x, y] = arr;
+      let w = 0, h = 0;
+      if (arr.length === 3) { w = arr[2]; h = arr[2]; }
+      else if (arr.length >= 4) { w = arr[2]; h = arr[3]; }
+      if (x <= W0 && y <= H0) {
+        const o = orientNormalized(x / W0, y / H0, w / W0, h / H0, orientation);
+        res = {
+          type: w > 0 ? 'frame' : 'point', ...o, source: arr.length === 3 ? 'EXIF SubjectArea (圆)' : 'EXIF SubjectArea',
+          px: { x, y, w: w || null, h: h || null, imgW: W0, imgH: H0 }, maybeDefault: false,
+        };
+      }
+    }
+  }
+
+  return res;
+}
+
 async function readExif(filePath) {
   const out = {};
   try {
@@ -371,12 +498,14 @@ async function readExif(filePath) {
     out.dpi = meta.density || null;
     out.hasIcc = !!meta.icc;
     out.chromaSubsampling = meta.chromaSubsampling || null;
+    out.focus = null;
     if (!meta.exif) return out;
 
     const ex = exifReader(meta.exif);
     const img = ex.Image || {};
     const ph = ex.Photo || {};
     const gps = ex.GPSInfo || {};
+    out.focus = extractFocusArea(meta.exif, ph, meta);
 
     out.camera = [img.Make, img.Model].filter(Boolean).join(' ').trim() || null;
     out.lens = ph.LensModel || null;

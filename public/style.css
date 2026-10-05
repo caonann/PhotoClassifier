@@ -154,6 +154,23 @@ select:focus { outline: none; border-color: var(--accent); }
 .thumb .status.skip { background: rgba(229,83,75,.85); }
 .thumb.processed img { opacity: .55; }
 .zoom-hint { position: absolute; bottom: 10px; right: 12px; font-size: 11px; color: #aaa; background: rgba(0,0,0,.45); padding: 2px 8px; border-radius: 4px; opacity: 0; transition: opacity .2s; }
+
+/* 对焦区域 */
+.focus-layer { position: absolute; pointer-events: none; }
+.focus-layer[hidden] { display: none; }
+.focus-box { position: absolute; transform: translate(-50%, -50%); border: 2px solid #3cff5a; border-radius: 3px; box-shadow: 0 0 0 1px rgba(0,0,0,.6), 0 0 0 1px rgba(0,0,0,.6) inset; }
+.focus-box::before, .focus-box::after { content: ''; position: absolute; left: 50%; top: 50%; background: #3cff5a; box-shadow: 0 0 2px #000; }
+.focus-box::before { width: 10px; height: 2px; transform: translate(-50%, -50%); }
+.focus-box::after { width: 2px; height: 10px; transform: translate(-50%, -50%); }
+.focus-box.point { width: 28px; height: 28px; border-radius: 50%; }
+.focus-box.point::before { width: 40px; }
+.focus-box.point::after { height: 40px; }
+.focus-box.default { border-color: #ffb86b; border-style: dashed; }
+.focus-box.default::before, .focus-box.default::after { background: #ffb86b; }
+.btn.active { border-color: var(--accent); color: #fff; box-shadow: 0 0 0 1px var(--accent) inset; }
+.focus-info { font-size: 12px; margin-top: 8px; color: var(--muted); }
+.focus-info b { color: #3cff5a; font-weight: normal; }
+.focus-info .warn { color: #ffb86b; }
 .stage:hover .zoom-hint { opacity: 1; }
 .stage img { cursor: zoom-in; }
 .row.between { justify-content: space-between; }
