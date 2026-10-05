@@ -63,7 +63,7 @@ body.resizing .resizer { pointer-events: auto; }
 /* 大图 */
 .viewer { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .stage { position: relative; flex: 1; min-height: 0; background: #0b0c0e; display: flex; align-items: center; justify-content: center; }
-.stage img { max-width: 100%; max-height: 100%; object-fit: contain; user-select: none; transition: opacity .12s; }
+.stage img { width: 100%; height: 100%; object-fit: contain; user-select: none; transition: opacity .12s; }
 .stage img.loading { opacity: .35; }
 .stage-empty { position: absolute; color: var(--muted); display: none; }
 .stage.empty .stage-empty { display: block; }
@@ -146,6 +146,8 @@ select:focus { outline: none; border-color: var(--accent); }
 
 /* 已处理状态 */
 .showall { display: flex; align-items: center; gap: 4px; white-space: nowrap; cursor: pointer; }
+.filter-sel { width: auto; padding: 3px 6px; font-size: 12px; max-width: 180px; }
+body.electron .topbar select { -webkit-app-region: no-drag; }
 .overlay-status { position: absolute; right: 12px; top: 10px; padding: 2px 8px; border-radius: 4px; font-size: 12px; display: none; }
 .overlay-status.copy { display: block; background: rgba(79,140,255,.85); color: #fff; }
 .overlay-status.skip { display: block; background: rgba(229,83,75,.85); color: #fff; }
@@ -180,7 +182,8 @@ select:focus { outline: none; border-color: var(--accent); }
 .zoomer[hidden] { display: none; }
 .zoom-canvas { flex: 1; overflow: hidden; position: relative; cursor: grab; }
 .zoom-canvas.dragging { cursor: grabbing; }
-.zoom-canvas img { position: absolute; left: 0; top: 0; transform-origin: 0 0; user-select: none; image-rendering: auto; will-change: transform; }
+.zoom-canvas img { position: absolute; left: 0; top: 0; max-width: none; max-height: none; transform-origin: 0 0; user-select: none; image-rendering: auto; }
+.zoom-canvas img.moving { will-change: transform; }
 .zoom-toolbar { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; background: rgba(27,30,35,.92); border: 1px solid var(--border); padding: 8px 12px; border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.5); }
 .zoom-toolbar span { min-width: 56px; text-align: center; font-variant-numeric: tabular-nums; }
 .zoom-loading { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.6); padding: 4px 12px; border-radius: 6px; font-size: 12px; color: #ccc; }

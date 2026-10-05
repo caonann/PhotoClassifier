@@ -204,62 +204,69 @@ async function copyPair(jpgName, cat) {
 }
 
 // ---------- 图像处理 ----------
-function cacheKey(filePath, stat, w) {
-  return crypto.createHash('md5').update(`${filePath}|${stat.mtimeMs}|${stat.size}|${w}`).digest('hex');
+function cacheKey(filePath, stat, w, preset) {
+  return crypto.createHash('md5').update(`${filePath}|${stat.mtimeMs}|${stat.size}|${w}${preset ? '|' + preset : ''}`).digest('hex');
 }
+
+// 主视图大图的编码预设，修改参数时同步改这里的字符串即可让旧缓存失效
+const BIG_PRESET = 'q95-444-icc-sharpen0.5';
 
 // 限制同时进行的图像解码数，避免首屏几十张 24MP 原图同时解码把 CPU/内存打满
 const MAX_DECODE = Math.max(2, Math.min(4, os.cpus().length - 1));
 let decoding = 0;
-const decodeQueue = [];
-function withDecodeSlot(fn) {
+const hiQueue = []; // 主视图大图：插队，且后到先处理（快速翻页时优先最新那张）
+const loQueue = []; // 缩略图：先到先处理
+function withDecodeSlot(fn, urgent = false) {
   return new Promise((resolve, reject) => {
     const run = () => {
       decoding++;
       fn().then(resolve, reject).finally(() => {
         decoding--;
-        const next = decodeQueue.shift();
+        const next = hiQueue.pop() || loQueue.shift();
         if (next) next();
       });
     };
-    decoding < MAX_DECODE ? run() : decodeQueue.push(run);
+    if (decoding < MAX_DECODE) run();
+    else (urgent ? hiQueue : loQueue).push(run);
   });
 }
 
 const inflight = new Map(); // cacheFile -> Promise，避免同一张图并发重复生成
 
 async function getResized(filePath, w) {
+  const big = w > 600;
   const stat = await fsp.stat(filePath);
-  const key = cacheKey(filePath, stat, w);
+  const key = cacheKey(filePath, stat, w, big ? BIG_PRESET : '');
   const cacheFile = path.join(CACHE_DIR, key + '.jpg');
   if (await exists(cacheFile)) return cacheFile;
   if (inflight.has(cacheFile)) return inflight.get(cacheFile);
   const job = withDecodeSlot(async () => {
     const tmp = cacheFile + '.' + process.pid + '.tmp';
-    // 小尺寸缩略图优先用大图缓存作为源，避免重复解码原图
-    let src = filePath;
-    if (w <= 400) {
-      const bigKey = path.join(CACHE_DIR, cacheKey(filePath, stat, 1800) + '.jpg');
-      if (await exists(bigKey)) src = bigKey;
-    }
     // sharp 对 JPEG 自动 shrink-on-load（按 1/2 1/4 1/8 解码），缩略图几乎不需要完整解码
-    await sharp(src, { failOn: 'none', sequentialRead: true })
+    let pipe = sharp(filePath, { failOn: 'none', sequentialRead: true })
       .rotate()
-      .resize({ width: w, height: w, fit: 'inside', withoutEnlargement: true, kernel: w <= 400 ? 'lanczos2' : 'lanczos3' })
-      .jpeg({ quality: w > 600 ? 86 : 75, mozjpeg: w > 600 })
-      .toFile(tmp);
+      .resize({ width: w, height: w, fit: 'inside', withoutEnlargement: true, kernel: big ? 'lanczos3' : 'lanczos2' });
+    if (big) {
+      // 主视图：4:4:4 不做色度抽样、q95、保留原始 ICC（P3/AdobeRGB 不被压成 sRGB）、缩小后轻微锐化
+      // 走本机回环不在乎体积，关掉 mozjpeg 换取约 2~3 倍的编码速度
+      pipe = pipe
+        .sharpen({ sigma: 0.5 })
+        .keepIccProfile()
+        .jpeg({ quality: 95, chromaSubsampling: '4:4:4', mozjpeg: false });
+    } else {
+      pipe = pipe.jpeg({ quality: 75 });
+    }
+    await pipe.toFile(tmp);
     await fsp.rename(tmp, cacheFile);
     return cacheFile;
-  }).finally(() => inflight.delete(cacheFile));
+  }, big).finally(() => inflight.delete(cacheFile));
   inflight.set(cacheFile, job);
   return job;
 }
 
-/** 直方图：R/G/B/亮度 各 256 bins，并给出曝光统计（基于 1800px 预览缓存计算，避免重复解码原图） */
+/** 直方图：R/G/B/亮度 各 256 bins，并给出曝光统计（缩到 400px 计算，JPEG 会 shrink-on-load 按 1/8 解码，开销很小） */
 async function computeHistogram(filePath) {
-  let src = filePath;
-  try { src = await getResized(filePath, 1800); } catch { /* 回退原图 */ }
-  const { data, info } = await sharp(src, { failOn: 'none', sequentialRead: true })
+  const { data, info } = await sharp(filePath, { failOn: 'none', sequentialRead: true })
     .rotate()
     .resize({ width: 400, fit: 'inside' })
     .removeAlpha()
@@ -648,11 +655,16 @@ app.get('/api/photos', wrap(async (req, res) => {
   );
   const photos = [];
   let total = 0, done = 0;
+  const counts = { skip: 0, categories: {} };
   for (const e of files) {
     if (!JPG_EXTS.has(path.extname(e.name).toLowerCase())) continue;
     total++;
     const rec = pm[e.name] || null;
-    if (rec) done++;
+    if (rec) {
+      done++;
+      if (rec.action === 'skip') counts.skip++;
+      else if (rec.category) counts.categories[rec.category] = (counts.categories[rec.category] || 0) + 1;
+    }
     if (rec && !showAll) continue;
     const st = await fsp.stat(path.join(src, e.name));
     photos.push({
@@ -665,12 +677,12 @@ app.get('/api/photos', wrap(async (req, res) => {
     });
   }
   photos.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  res.json({ sourceDir: src, photos, total, done });
+  res.json({ sourceDir: src, photos, total, done, counts });
 }));
 
 app.get('/api/image', wrap(async (req, res) => {
   const name = safeName(req.query.name);
-  const w = Math.min(Math.max(parseInt(req.query.w, 10) || 1800, 64), 4000);
+  const w = Math.min(Math.max(parseInt(req.query.w, 10) || 1800, 64), 5120);
   const file = path.join(requireSource(), name);
   if (!(await exists(file))) throw httpError(404, '照片不存在');
   const out = await getResized(file, w);

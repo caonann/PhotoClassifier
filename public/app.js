@@ -13,7 +13,10 @@ const state = {
   busy: false,
   infoAbort: null,
   lastHistogram: null,
-  showAll: false,
+  // 过滤：'pending' 未处理 | 'all' 全部 | 'done' 全部已处理 | 'skip' 已跳过 | 'cat:<名称>' 某个分类
+  filter: localStorage.getItem('photoClassifier.filter') || 'pending',
+  allPhotos: [],   // 服务端返回的完整列表（含处理状态），过滤后得到 state.photos
+  counts: { skip: 0, categories: {} },
   focus: null,
   showFocus: localStorage.getItem('photoClassifier.showFocus') !== '0',
 };
@@ -88,21 +91,65 @@ function renderCategories() {
     });
     list.appendChild(row);
   });
+  if (state.total) renderFilterOptions();
 }
 
-// ---------- 照片列表 ----------
+// ---------- 照片列表 / 过滤 ----------
+const isPending = (f) => f === 'pending';
+function matchFilter(p, f) {
+  if (f === 'all') return true;
+  if (f === 'pending') return !p.processed;
+  if (f === 'done') return !!p.processed;
+  if (f === 'skip') return p.processed?.action === 'skip';
+  if (f.startsWith('cat:')) return p.processed?.action === 'copy' && p.processed.category === f.slice(4);
+  return true;
+}
+
+function renderFilterOptions() {
+  const sel = $('filterSel');
+  const c = state.counts || { skip: 0, categories: {} };
+  const pending = state.total - state.done;
+  const cats = state.config?.categories || [];
+  // 配置里已删除、但历史记录里仍有的分类也列出来，方便回看
+  const extra = Object.keys(c.categories).filter((n) => !cats.some((x) => x.name === n));
+  const opts = [
+    ['pending', `未处理 (${pending})`],
+    ['all', `全部 (${state.total})`],
+    ['done', `已处理 (${state.done})`],
+    ['skip', `已跳过 (${c.skip})`],
+    ...cats.map((x) => [`cat:${x.name}`, `→ ${x.name} (${c.categories[x.name] || 0})`]),
+    ...extra.map((n) => [`cat:${n}`, `→ ${n} (${c.categories[n]})（已移除）`]),
+  ];
+  sel.innerHTML = opts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join('');
+  if (!opts.some(([v]) => v === state.filter)) state.filter = 'pending';
+  sel.value = state.filter;
+}
+
+function applyFilter(keepIndex = true) {
+  const prevName = current()?.name;
+  state.photos = state.allPhotos.filter((p) => matchFilter(p, state.filter));
+  let idx = keepIndex ? state.photos.findIndex((p) => p.name === prevName) : 0;
+  if (idx < 0) idx = Math.min(state.index, state.photos.length - 1);
+  state.index = Math.max(0, idx);
+  renderFilterOptions();
+  renderFilmstrip();
+  showCurrent();
+}
+
+function setFilter(f) {
+  state.filter = f;
+  localStorage.setItem('photoClassifier.filter', f);
+  applyFilter(true);
+}
+
 async function loadPhotos(keepIndex = false) {
   try {
-    const data = await api('/api/photos' + (state.showAll ? '?all=1' : ''));
-    const prevName = current()?.name;
-    state.photos = data.photos;
+    const data = await api('/api/photos?all=1');
+    state.allPhotos = data.photos;
     state.total = data.total;
     state.done = data.done;
-    let idx = keepIndex ? state.photos.findIndex((p) => p.name === prevName) : 0;
-    if (idx < 0) idx = Math.min(state.index, state.photos.length - 1);
-    state.index = Math.max(0, idx);
-    renderFilmstrip();
-    showCurrent();
+    state.counts = data.counts || { skip: 0, categories: {} };
+    applyFilter(keepIndex);
   } catch (e) {
     toast(e.message, true);
   }
@@ -188,7 +235,9 @@ function renderFilmstrip() {
   strip.nodes.clear();
   el.innerHTML = '';
   if (!state.photos.length) {
-    el.innerHTML = `<div class="empty">${state.total ? '全部照片已处理完 🎉<br><br>勾选顶部「显示已处理」可回看' : '文件夹中没有 JPG 照片'}</div>`;
+    let msg = '文件夹中没有 JPG 照片';
+    if (state.total) msg = isPending(state.filter) ? '全部照片已处理完 🎉<br><br>顶部「显示」可切换查看已处理的照片' : '当前过滤条件下没有照片';
+    el.innerHTML = `<div class="empty">${msg}</div>`;
     return;
   }
   const spacer = document.createElement('div');
@@ -254,11 +303,9 @@ function showCurrent() {
     return;
   }
   stage.classList.remove('empty');
-  img.classList.add('loading');
   state.focus = null;
   renderFocus();
-  img.src = imgUrl(p.name, 1800);
-  img.onload = () => { img.classList.remove('loading'); renderFocus(); };
+  setMainImage(p);
   $('overlayName').textContent = `${p.name}  (${state.index + 1}/${state.photos.length})`;
   if (p.processed) {
     status.className = 'overlay-status ' + p.processed.action;
@@ -267,8 +314,69 @@ function showCurrent() {
   renderStars(p.rating);
   updateFilmstripActive();
   loadInfo(p.name);
-  const n = state.photos[state.index + 1];
-  if (n) { const pre = new Image(); pre.src = imgUrl(n.name, 1800); }
+  // 预取前后两张，翻页时直接命中已解码的位图
+  for (const d of [1, -1]) {
+    const n = state.photos[state.index + d];
+    if (n) loadDecoded(imgUrl(n.name, state.mainW)).catch(() => {});
+  }
+}
+
+// ---------- 主视图大图 ----------
+// 按舞台实际物理像素（CSS 尺寸 × devicePixelRatio）请求大图，按 512 分档避免缓存碎片
+const MAIN_STEP = 512, MAIN_MAX = 5120;
+function mainTargetWidth() {
+  const st = $('stage');
+  const dpr = window.devicePixelRatio || 1;
+  const px = Math.max(st.clientWidth, st.clientHeight, 600) * dpr;
+  return Math.min(MAIN_MAX, Math.ceil(px / MAIN_STEP) * MAIN_STEP);
+}
+
+/** 已解码大图的 LRU：持有 Image 引用让解码后的位图常驻内存，decode() 在后台线程完成，不阻塞主线程 */
+const decodedCache = new Map(); // url -> { img, ready, promise }
+function loadDecoded(url) {
+  let ent = decodedCache.get(url);
+  if (ent) { decodedCache.delete(url); decodedCache.set(url, ent); return ent.promise; }
+  const im = new Image();
+  im.decoding = 'async';
+  im.src = url;
+  ent = { img: im, ready: false, promise: null };
+  ent.promise = im.decode().then(() => { ent.ready = true; return im; });
+  ent.promise.catch(() => decodedCache.delete(url));
+  decodedCache.set(url, ent);
+  while (decodedCache.size > 5) decodedCache.delete(decodedCache.keys().next().value);
+  return ent.promise;
+}
+function isDecoded(url) { const e = decodedCache.get(url); return !!(e && e.ready); }
+
+let mainToken = 0;
+function setMainImage(p) {
+  const img = $('mainImg');
+  const w = mainTargetWidth();
+  const url = imgUrl(p.name, w);
+  state.mainW = w;
+  state.mainUrl = url;
+  const token = ++mainToken;
+  img.onload = () => { img.classList.remove('loading'); renderFocus(); };
+  if (isDecoded(url)) { img.src = url; return; }
+  // 大图还没好：先用缩略图垫底（通常已在浏览器缓存里，瞬间显示），翻页手感不受大图生成速度影响
+  img.classList.remove('loading');
+  img.src = imgUrl(p.name, 240);
+  loadDecoded(url).then(() => {
+    if (token === mainToken) img.src = url;
+  }).catch(() => {
+    if (token === mainToken) img.classList.add('loading');
+  });
+}
+
+// 窗口变大 / 进入全屏 / 拖动缩略图栏后，如果需要更高分辨率就补一张，变小则不动
+new ResizeObserver(() => maybeUpgradeMain()).observe($('stage'));
+let mainResizeTimer = 0;
+function maybeUpgradeMain() {
+  clearTimeout(mainResizeTimer);
+  mainResizeTimer = setTimeout(() => {
+    const p = current();
+    if (p && mainTargetWidth() > (state.mainW || 0)) setMainImage(p);
+  }, 250);
 }
 
 async function loadInfo(name) {
@@ -461,14 +569,20 @@ async function doAction(url, body, msgFn) {
   try {
     const r = await api(url, { method: 'POST', body: { name: p.name, ...body } });
     toast(msgFn(p, r));
-    if (!p.processed) state.done++;
-    if (state.showAll) {
-      p.processed = { action: body.category ? 'copy' : 'skip', category: body.category || null };
+    const prev = p.processed;
+    if (!prev) state.done++;
+    else if (prev.action === 'skip') state.counts.skip--;
+    else if (prev.category) state.counts.categories[prev.category] = Math.max(0, (state.counts.categories[prev.category] || 1) - 1);
+    p.processed = { action: body.category ? 'copy' : 'skip', category: body.category || null };
+    if (p.processed.action === 'skip') state.counts.skip++;
+    else state.counts.categories[p.processed.category] = (state.counts.categories[p.processed.category] || 0) + 1;
+    if (matchFilter(p, state.filter)) {
       if (state.index < state.photos.length - 1) state.index++;
     } else {
       state.photos.splice(state.index, 1);
       if (state.index >= state.photos.length) state.index = Math.max(0, state.photos.length - 1);
     }
+    renderFilterOptions();
     renderFilmstrip();
     showCurrent();
     $('undoBtn').disabled = false;
@@ -506,11 +620,34 @@ function go(delta) {
 }
 
 // ---------- 放大查看器 ----------
-const zoom = { open: false, scale: 1, min: 0.1, max: 8, x: 0, y: 0, natW: 0, natH: 0, dragging: false, lastX: 0, lastY: 0 };
+const zoom = {
+  open: false, scale: 1, min: 0.1, max: 8, x: 0, y: 0, natW: 0, natH: 0, dragging: false, lastX: 0, lastY: 0,
+  token: 0, previewUrl: '', previewW: 0, fullUrl: '', fullImg: null, idleTimer: 0,
+};
 
+/** 当前倍率下屏幕所需像素不超过预览图时，显示预览图（已按屏幕尺寸高质量缩放），否则显示原图 */
+function zoomPickSource() {
+  if (!zoom.fullImg) return;
+  const dpr = window.devicePixelRatio || 1;
+  const usePreview = zoom.previewW && zoom.scale * dpr * zoom.natW <= zoom.previewW * 1.02;
+  const want = usePreview ? zoom.previewUrl : zoom.fullUrl;
+  const img = $('zoomImg');
+  if (img.getAttribute('src') !== want) img.src = want;
+}
 function zoomApply() {
-  $('zoomImg').style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`;
+  const img = $('zoomImg');
+  img.style.transform = `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})`;
   $('zoomLevel').textContent = `${Math.round(zoom.scale * 100)}%`;
+  // 交互期间提升为合成层，拖拽/缩放只走 GPU；停下 150ms 后取消，让浏览器按最终倍率高质量重绘
+  img.classList.add('moving');
+  clearTimeout(zoom.idleTimer);
+  zoom.idleTimer = setTimeout(() => img.classList.remove('moving'), 150);
+  zoomPickSource();
+}
+function zoomSetSize() {
+  const img = $('zoomImg');
+  img.style.width = zoom.natW + 'px';
+  img.style.height = zoom.natH + 'px';
 }
 function zoomFit() {
   const c = $('zoomCanvas');
@@ -535,46 +672,74 @@ function zoomTo(s, cx, cy) {
 function openZoom(e) {
   const p = current();
   if (!p) return;
+  const token = ++zoom.token;
   zoom.open = true;
-  const z = $('zoomer');
   const img = $('zoomImg');
-  z.hidden = false;
+  $('zoomer').hidden = false;
   $('zoomLoading').hidden = false;
-  // 先用已缓存的预览图占位，再加载原图
-  img.src = $('mainImg').src;
-  img.onload = () => {
-    if (!zoom.natW) { zoom.natW = img.naturalWidth; zoom.natH = img.naturalHeight; zoomFit(); }
-  };
+  zoom.previewUrl = state.mainUrl || imgUrl(p.name, mainTargetWidth());
+  zoom.previewW = 0;
+  zoom.fullUrl = `/api/original?name=${encodeURIComponent(p.name)}`;
+  zoom.fullImg = null;
+  zoom.natW = zoom.natH = 0;
+  img.onload = null;
+  // 1) 先用主视图的大图占位（通常已解码在内存中，瞬间可见）
+  loadDecoded(zoom.previewUrl).then((pv) => {
+    if (token !== zoom.token) return;
+    zoom.previewW = pv.naturalWidth;
+    if (zoom.fullImg) { zoomPickSource(); return; }
+    zoom.natW = pv.naturalWidth; zoom.natH = pv.naturalHeight;
+    zoomSetSize();
+    img.src = zoom.previewUrl;
+    zoomFit();
+  }).catch(() => {});
+  // 2) 后台线程解码原图，完成后再接管，不阻塞交互
   const full = new Image();
-  full.onload = () => {
-    if (!zoom.open) return;
-    const ratio = full.naturalWidth / (zoom.natW || full.naturalWidth);
+  full.decoding = 'async';
+  full.src = zoom.fullUrl;
+  full.decode().then(() => {
+    if (token !== zoom.token || !zoom.open) return;
+    const ratio = zoom.natW ? full.naturalWidth / zoom.natW : 0;
+    zoom.fullImg = full;
     zoom.natW = full.naturalWidth; zoom.natH = full.naturalHeight;
-    // 保持视觉大小不变
-    zoom.scale = zoom.scale / ratio;
-    zoom.min = Math.min(0.1, zoom.scale);
-    img.onload = null;
-    img.src = full.src;
-    zoomApply();
+    zoomSetSize();
     $('zoomLoading').hidden = true;
-    // 双击时直接放到 1:1 并居中到点击位置
     if (e && e.clientX != null) {
+      // 双击时直接放到 1:1 并居中到点击位置
       const c = $('zoomCanvas');
-      const rect = $('mainImg').getBoundingClientRect();
-      const rx = (e.clientX - rect.left) / rect.width, ry = (e.clientY - rect.top) / rect.height;
+      const mi = $('mainImg');
+      const box = mi.getBoundingClientRect();
+      const k = Math.min(box.width / mi.naturalWidth, box.height / mi.naturalHeight);
+      const dw = mi.naturalWidth * k, dh = mi.naturalHeight * k;
+      const left = box.left + (box.width - dw) / 2, top = box.top + (box.height - dh) / 2;
+      const rx = Math.min(1, Math.max(0, (e.clientX - left) / dw)), ry = Math.min(1, Math.max(0, (e.clientY - top) / dh));
       zoom.scale = 1;
+      zoom.min = Math.min(0.1, Math.min(c.clientWidth / zoom.natW, c.clientHeight / zoom.natH));
       zoom.x = c.clientWidth / 2 - rx * zoom.natW;
       zoom.y = c.clientHeight / 2 - ry * zoom.natH;
       zoomApply();
+    } else if (ratio) {
+      // 保持视觉大小不变
+      zoom.scale = zoom.scale / ratio;
+      zoom.min = Math.min(0.1, zoom.scale);
+      zoomApply();
+    } else {
+      zoomFit();
     }
-  };
-  full.src = `/api/original?name=${encodeURIComponent(p.name)}`;
+  }).catch(() => {
+    if (token === zoom.token) $('zoomLoading').textContent = '原图加载失败';
+  });
 }
 function closeZoom() {
   zoom.open = false;
+  zoom.token++;
   zoom.natW = zoom.natH = 0;
+  zoom.fullImg = null;
   $('zoomer').hidden = true;
-  $('zoomImg').src = '';
+  $('zoomLoading').textContent = '正在加载原图…';
+  const img = $('zoomImg');
+  img.onload = null;
+  img.removeAttribute('src');
 }
 $('zoomBtn').onclick = () => openZoom();
 $('mainImg').addEventListener('dblclick', openZoom);
@@ -660,7 +825,7 @@ $('pickCatDirBtn').onclick = async () => {
   if (dir) $('newCatDirInput').value = dir;
 };
 $('refreshBtn').onclick = () => loadPhotos(true);
-$('showAllChk').onchange = (e) => { state.showAll = e.target.checked; loadPhotos(true); };
+$('filterSel').onchange = (e) => { setFilter(e.target.value); e.target.blur(); };
 $('prevBtn').onclick = () => go(-1);
 $('nextBtn').onclick = () => go(1);
 $('skipBtn').onclick = skip;
